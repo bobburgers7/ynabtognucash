@@ -1,108 +1,67 @@
 import csv
-import sys
-import os
 from datetime import datetime
-import gnucash
-from gnucash import Session, Transaction, Split, GncNumeric, Account, GnuCashBackendException
 from decimal import Decimal
+import gnucash
+from gnucash import Session, Transaction, Split, GncNumeric
 
 def import_ynab_to_gnucash(input_file, gnucash_file):
-    # Check if the GnuCash file exists
-    file_exists = os.path.isfile(gnucash_file)
-
-    try:
-        # If the file doesn't exist, create it
-        if not file_exists:
-            session = Session()
-            book = session.book
-            root = book.get_root_account()
-            USD = book.get_table().lookup('CURRENCY', 'USD')
-            session.save(gnucash_file)
-            session.end()
-        
-        # Now open the file (whether it existed before or we just created it)
-        session = Session(gnucash_file)
-        book = session.book
-        root = book.get_root_account()
-        USD = book.get_table().lookup('CURRENCY', 'USD')
-
-        # Function to find or create an account
-        def find_or_create_account(name, account_type):
-            account = root.lookup_by_name(name)
-            if account is None:
-                account = Account(book)
-                account.set_name(name)
-                account.set_type(account_type)
-                account.set_commodity(USD)
-                root.append_child(account)
-            return account
-
-        # Read the YNAB CSV file
-        with open(input_file, 'r', encoding='utf-8-sig') as infile:
-            reader = csv.DictReader(infile)
+    session = Session(gnucash_file)
+    book = session.book
+    root = book.get_root_account()
+    
+    with open(input_file, 'r') as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            date = datetime.strptime(row['Date'], '%Y-%m-%d')
+            payee = row['Payee']
+            category = row['Category Group/Category']
+            memo = row['Memo']
+            outflow = Decimal(row['Outflow'] or '0')
+            inflow = Decimal(row['Inflow'] or '0')
+            amount = inflow - outflow  # Positive for inflow, negative for outflow
             
-            for row in reader:
-                try:
-                    date = datetime.strptime(row['Date'], '%m/%d/%Y')
-                    description = row['Payee']
-                    account_name = row['Account']
-                    memo = row['Memo']
-                    category = row['Category Group/Category']
-                    
-                    outflow = Decimal(row['Outflow'].replace('$', '').replace(',', '') or '0')
-                    inflow = Decimal(row['Inflow'].replace('$', '').replace(',', '') or '0')
-                    amount = inflow - outflow
+            from_account = find_account(root, row['Account'])
+            to_account = find_account(root, category)
+            
+            trans = Transaction(book)
+            trans.BeginEdit()
+            trans.SetCurrency(from_account.GetCommodity())
+            trans.SetDate(date.day, date.month, date.year)
+            trans.SetDescription(payee)
+            trans.SetNotes(memo)
+            
+            split1 = Split(book)
+            split1.SetParent(trans)
+            split1.SetAccount(from_account)
+            split1.SetValue(GncNumeric(int(amount * 100), 100))
+            split1.SetAmount(GncNumeric(int(amount * 100), 100))
+            
+            split2 = Split(book)
+            split2.SetParent(trans)
+            split2.SetAccount(to_account)
+            split2.SetValue(GncNumeric(int(-amount * 100), 100))
+            split2.SetAmount(GncNumeric(int(-amount * 100), 100))
+            
+            trans.CommitEdit()
+    
+    session.save()
+    session.end()
+    session.destroy()
+    print("Import completed successfully.")
 
-                    # Create the transaction
-                    tx = Transaction(book)
-                    tx.BeginEdit()
-                    tx.SetCurrency(USD)
-                    tx.SetDate(date.day, date.month, date.year)
-                    tx.SetDescription(description)
-                    tx.SetNotes(memo)
-
-                    # Set up the splits
-                    account = find_or_create_account(account_name, gnucash.ACCT_TYPE_BANK)
-                    category_account = find_or_create_account(category, gnucash.ACCT_TYPE_EXPENSE)
-
-                    # Main split (for the account)
-                    split1 = Split(book)
-                    split1.SetParent(tx)
-                    split1.SetAccount(account)
-                    split1.SetValue(GncNumeric(int(amount * 100), 100))  # GnuCash uses integer math
-                    split1.SetAmount(GncNumeric(int(amount * 100), 100))
-
-                    # Category split
-                    split2 = Split(book)
-                    split2.SetParent(tx)
-                    split2.SetAccount(category_account)
-                    split2.SetValue(GncNumeric(int(-amount * 100), 100))
-                    split2.SetAmount(GncNumeric(int(-amount * 100), 100))
-
-                    tx.CommitEdit()
-
-                except KeyError as e:
-                    print(f"Error: Missing column {e}. Row data: {row}")
-                except ValueError as e:
-                    print(f"Error parsing data: {e}. Row data: {row}")
-
-        # Save and close the GnuCash file
-        session.save()
-        session.end()
-        session.destroy()
-        print(f"Import complete. GnuCash file updated: {gnucash_file}")
-
-    except GnuCashBackendException as e:
-        print(f"Error opening or creating GnuCash file: {e}")
+def find_account(root, name):
+    acc = root.lookup_by_name(name)
+    if acc is None:
+        acc = gnucash.Account(root.get_book())
+        acc.SetName(name)
+        acc.SetType(gnucash.ACCT_TYPE_EXPENSE)
+        acc.SetCommodity(root.get_commodity())
+        root.append_child(acc)
+    return acc
 
 def main():
-    if len(sys.argv) != 3:
-        print("Usage: python script.py <input_ynab_file.csv> <gnucash_file.gnucash>")
-        sys.exit(1)
-    
-    input_file = sys.argv[1]
-    gnucash_file = sys.argv[2]
-    
+    input_file = 'path/to/your/ynab_export.csv'
+    gnucash_file = 'path/to/your/gnucash_file.gnucash'
     import_ynab_to_gnucash(input_file, gnucash_file)
 
 if __name__ == "__main__":
